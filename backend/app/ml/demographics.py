@@ -1,4 +1,5 @@
 import logging
+from collections import Counter
 from dataclasses import dataclass
 
 import cv2
@@ -9,8 +10,10 @@ from app.ml.tracker import TrackedFrame
 
 logger = logging.getLogger(__name__)
 
-# Number of top crops to try per track (fallback if face detection fails on best crop)
-_MAX_CROPS_PER_TRACK = 3
+# Number of top crops to try per track (more crops = better voting accuracy)
+_MAX_CROPS_PER_TRACK = 5
+# Minimum gender confidence to accept a prediction (0-1)
+_MIN_GENDER_CONFIDENCE = 0.65
 
 
 @dataclass
@@ -88,14 +91,41 @@ def _find_top_crops(
 
 
 def _analyze_single_crop(crop: np.ndarray) -> dict | None:
-    """Try to analyze a single person crop with proper face detection."""
-    # First try with opencv face detector (most reliable for this use case)
+    """Try to analyze a single person crop with proper face detection.
+
+    Uses retinaface for higher accuracy, then falls back to opencv.
+    Does NOT use detector_backend='skip' to avoid low-quality predictions.
+    """
+    backends = ["retinaface", "opencv"]
+    for backend in backends:
+        try:
+            analyses = DeepFace.analyze(
+                img_path=crop,
+                actions=["age", "gender"],
+                enforce_detection=True,
+                detector_backend=backend,
+                silent=True,
+            )
+            result = analyses[0] if isinstance(analyses, list) else analyses
+            face_conf = result.get("face_confidence", 0)
+            if face_conf and face_conf > 0.6:
+                return result
+        except (ValueError, Exception):
+            continue
+
+    # Fallback: take upper 40% of body crop as rough head region
+    h = crop.shape[0]
+    head_crop = crop[0 : int(h * 0.4), :]
+    if head_crop.size == 0:
+        return None
+
+    # Try head crop with retinaface (still enforce detection to avoid garbage predictions)
     try:
         analyses = DeepFace.analyze(
-            img_path=crop,
+            img_path=head_crop,
             actions=["age", "gender"],
             enforce_detection=True,
-            detector_backend="opencv",
+            detector_backend="retinaface",
             silent=True,
         )
         result = analyses[0] if isinstance(analyses, list) else analyses
@@ -105,23 +135,7 @@ def _analyze_single_crop(crop: np.ndarray) -> dict | None:
     except (ValueError, Exception):
         pass
 
-    # Fallback: take upper 40% of body crop as rough head region, analyze without detection
-    h = crop.shape[0]
-    head_crop = crop[0 : int(h * 0.4), :]
-    if head_crop.size == 0:
-        return None
-
-    try:
-        analyses = DeepFace.analyze(
-            img_path=head_crop,
-            actions=["age", "gender"],
-            enforce_detection=False,
-            detector_backend="skip",
-            silent=True,
-        )
-        return analyses[0] if isinstance(analyses, list) else analyses
-    except Exception:
-        return None
+    return None
 
 
 def analyze_demographics(
@@ -132,27 +146,48 @@ def analyze_demographics(
     results: dict[int, DemographicResult] = {}
 
     for tid, crop_list in all_crops.items():
-        analysis = None
+        # Collect all successful analyses for voting
+        successful_analyses: list[dict] = []
         for frame_idx, crop in crop_list:
             analysis = _analyze_single_crop(crop)
             if analysis is not None:
-                break
+                successful_analyses.append(analysis)
 
-        if analysis is None:
+        if not successful_analyses:
             logger.warning("Demographics failed for track %d (tried %d crops)", tid, len(crop_list))
             continue
 
-        age = int(analysis["age"])
-        dominant_gender = analysis.get("dominant_gender", "Man")
-        gender_scores = analysis.get("gender", {})
-        confidence = gender_scores.get(dominant_gender, 50.0) / 100.0
-        gender = "male" if dominant_gender == "Man" else "female"
+        # Multi-crop voting: use majority gender from all successful analyses
+        gender_votes: list[tuple[str, float]] = []
+        ages: list[int] = []
+        for analysis in successful_analyses:
+            dominant_gender = analysis.get("dominant_gender", "Man")
+            gender_scores = analysis.get("gender", {})
+            conf = gender_scores.get(dominant_gender, 50.0) / 100.0
+            gender_votes.append(("male" if dominant_gender == "Man" else "female", conf))
+            ages.append(int(analysis["age"]))
+
+        # Count votes and compute average confidence per gender
+        vote_counts = Counter(g for g, _ in gender_votes)
+        winner_gender = vote_counts.most_common(1)[0][0]
+        winner_confidences = [c for g, c in gender_votes if g == winner_gender]
+        avg_confidence = sum(winner_confidences) / len(winner_confidences)
+
+        # Skip if average confidence is too low (likely unreliable)
+        if avg_confidence < _MIN_GENDER_CONFIDENCE:
+            logger.info(
+                "Track %d: gender confidence %.2f below threshold %.2f, skipping",
+                tid, avg_confidence, _MIN_GENDER_CONFIDENCE,
+            )
+            continue
+
+        avg_age = round(sum(ages) / len(ages))
 
         results[tid] = DemographicResult(
-            age=age,
-            age_group=_classify_age_group(age),
-            gender=gender,
-            confidence=confidence,
+            age=avg_age,
+            age_group=_classify_age_group(avg_age),
+            gender=winner_gender,
+            confidence=avg_confidence,
         )
 
     logger.info("Demographics: %d/%d tracks analyzed", len(results), len(all_crops))
