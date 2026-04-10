@@ -1,18 +1,19 @@
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
-# Install Python 3.11 and system deps
+# Install system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-venv \
-    python3.11-dev \
     ffmpeg \
     libgl1 \
     libglib2.0-0 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Set up venv so all packages install cleanly under Python 3.11
-RUN python3.11 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# Install uv (includes Python management)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+ENV UV_PYTHON=3.11
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
@@ -20,10 +21,10 @@ WORKDIR /app
 
 # Install Python deps
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir -e ".[dev]"
+RUN uv sync --no-dev --no-install-project
 
 # Pre-download YOLOv8n model weights
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+RUN uv run python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 COPY . .
 
@@ -32,4 +33,4 @@ RUN mkdir -p storage/uploads storage/db
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
