@@ -4,14 +4,15 @@ FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-venv \
-    python3-pip \
+    python3.11-dev \
     ffmpeg \
     libgl1 \
     libglib2.0-0 \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python \
-    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
     && rm -rf /var/lib/apt/lists/*
 
+# Set up venv so all packages install cleanly under Python 3.11
+RUN python3.11 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
