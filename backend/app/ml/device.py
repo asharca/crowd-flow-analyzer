@@ -29,12 +29,22 @@ def resolve_demographics_workers() -> int:
     return max(2, cpu_count - 1)
 
 
-def resolve_yolo_batch_size() -> int:
+def _cuda_device_index(device: str) -> int:
+    """Parse device string like 'cuda', 'cuda:0', 'cuda:1' → int index."""
+    if ":" in device:
+        return int(device.split(":")[1])
+    return 0
+
+
+def resolve_yolo_batch_size(device: str) -> int:
     """Return YOLO inference batch size based on available device memory."""
     if settings.yolo_batch_size > 0:
         return settings.yolo_batch_size
-    if torch.cuda.is_available():
-        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+    if device.startswith("cuda") and torch.cuda.is_available():
+        idx = _cuda_device_index(device)
+        vram_gb = torch.cuda.get_device_properties(idx).total_memory / (1024 ** 3)
+        if vram_gb >= 16:
+            return 64
         if vram_gb >= 8:
             return 32
         if vram_gb >= 4:
@@ -62,4 +72,4 @@ configure_threads()
 
 DEVICE: str = resolve_device()
 DEMOGRAPHICS_WORKERS: int = resolve_demographics_workers()
-YOLO_BATCH_SIZE: int = resolve_yolo_batch_size()
+YOLO_BATCH_SIZE: int = resolve_yolo_batch_size(DEVICE)

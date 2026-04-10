@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from app.ml.device import DEMOGRAPHICS_WORKERS
+from app.ml.device import DEMOGRAPHICS_WORKERS, DEVICE, _cuda_device_index
 from app.ml.tracker import TrackedFrame
 
 logger = logging.getLogger(__name__)
@@ -41,14 +41,14 @@ def _get_face_analyzer():
     if not hasattr(local, "app"):
         from insightface.app import FaceAnalysis
 
-        providers = (
-            ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            if "CUDAExecutionProvider" in rt.get_available_providers()
-            else ["CPUExecutionProvider"]
-        )
+        available = rt.get_available_providers()
+        if "CUDAExecutionProvider" in available and DEVICE.startswith("cuda"):
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            ctx_id = _cuda_device_index(DEVICE)
+        else:
+            providers = ["CPUExecutionProvider"]
+            ctx_id = -1
         app = FaceAnalysis(name="buffalo_l", providers=providers)
-        # ctx_id=0 → GPU device 0; ctx_id=-1 → CPU
-        ctx_id = 0 if "CUDAExecutionProvider" in providers else -1
         app.prepare(ctx_id=ctx_id, det_size=(640, 640))
         local.app = app
     return local.app
