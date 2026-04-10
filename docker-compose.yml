@@ -39,9 +39,11 @@ services:
     command: uv run celery -A app.worker.celery_app worker --loglevel=info --pool=solo
     environment:
       - CFA_REDIS_URL=redis://cfa-redis:6379/0
-      # GPU selection: use 'cuda:1' to target a specific GPU index.
-      # 'auto' picks the first available CUDA device.
-      - CFA_ML_DEVICE=cuda:1
+      # Pin to physical GPU 1 (idle). CUDA_VISIBLE_DEVICES remaps it to
+      # logical index 0 inside the container, so CFA_ML_DEVICE=cuda:0.
+      # Change CUDA_VISIBLE_DEVICES=0 + CFA_ML_DEVICE=cuda:0 to use GPU 0 instead.
+      - CUDA_VISIBLE_DEVICES=1
+      - CFA_ML_DEVICE=cuda:0
       # Tune for your server (optional overrides):
       # CFA_DEMOGRAPHICS_WORKERS=12
       # CFA_YOLO_BATCH_SIZE=64
