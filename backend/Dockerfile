@@ -1,5 +1,6 @@
-# CUDA 12.1 + cuDNN 8 runtime — provides libcuda/libcudnn for PyTorch & ONNX Runtime GPU
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+# CUDA 12.9 runtime — matches driver 575.57.08 (minimum for CUDA 12.9).
+# torch+cu129 requires CUDA 12.9 runtime; cu130 requires driver >=580 (unsupported).
+FROM nvidia/cuda:12.9.1-cudnn-runtime-ubuntu22.04
 
 # Install system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
