@@ -28,7 +28,7 @@ services:
 
   worker:
     build: ./backend
-    command: celery -A app.worker.celery_app worker --loglevel=info --pool=solo
+    command: uv run celery -A app.worker.celery_app worker --loglevel=info --pool=solo
     environment:
       - CFA_REDIS_URL=redis://redis:6379/0
     volumes:
