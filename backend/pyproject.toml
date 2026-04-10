@@ -13,9 +13,8 @@ dependencies = [
     "python-multipart>=0.0.9",
     "ultralytics>=8.2.0",
     "supervision>=0.21.0",
-    "deepface>=0.0.93",
-    "retina-face>=0.0.17",
-    "tf-keras>=2.16.0",
+    "insightface>=0.7.3",
+    "onnxruntime-gpu>=1.18.0",
     "opencv-python-headless>=4.9.0",
 ]
 
