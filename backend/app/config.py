@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
@@ -27,6 +28,14 @@ class Settings(BaseSettings):
     # ML pipeline
     frame_skip: int = 3
     yolo_model: str = "yolov8n.pt"
+    # "auto" selects CUDA > MPS > CPU at runtime
+    ml_device: str = "auto"
+    # 0 = use all available CPU threads
+    ml_num_threads: int = 0
+    # 0 = auto-scale based on CPU count
+    demographics_workers: int = 0
+    # 0 = auto-scale based on device memory / CPU
+    yolo_batch_size: int = 0
 
     # CORS
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]

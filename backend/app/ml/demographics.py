@@ -1,17 +1,19 @@
 import logging
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
 from deepface import DeepFace
 
+from app.ml.device import DEMOGRAPHICS_WORKERS
 from app.ml.tracker import TrackedFrame
 
 logger = logging.getLogger(__name__)
 
 # Number of top crops to try per track (more crops = better voting accuracy)
-_MAX_CROPS_PER_TRACK = 5
+_MAX_CROPS_PER_TRACK = 3
 # Minimum gender confidence to accept a prediction (0-1)
 _MIN_GENDER_CONFIDENCE = 0.65
 
@@ -93,10 +95,10 @@ def _find_top_crops(
 def _analyze_single_crop(crop: np.ndarray) -> dict | None:
     """Try to analyze a single person crop with proper face detection.
 
-    Uses retinaface for higher accuracy, then falls back to opencv.
+    Uses ssd for speed, then falls back to opencv.
     Does NOT use detector_backend='skip' to avoid low-quality predictions.
     """
-    backends = ["retinaface", "opencv"]
+    backends = ["ssd", "opencv"]
     for backend in backends:
         try:
             analyses = DeepFace.analyze(
@@ -119,13 +121,13 @@ def _analyze_single_crop(crop: np.ndarray) -> dict | None:
     if head_crop.size == 0:
         return None
 
-    # Try head crop with retinaface (still enforce detection to avoid garbage predictions)
+    # Try head crop with ssd (still enforce detection to avoid garbage predictions)
     try:
         analyses = DeepFace.analyze(
             img_path=head_crop,
             actions=["age", "gender"],
             enforce_detection=True,
-            detector_backend="retinaface",
+            detector_backend="ssd",
             silent=True,
         )
         result = analyses[0] if isinstance(analyses, list) else analyses
@@ -138,57 +140,67 @@ def _analyze_single_crop(crop: np.ndarray) -> dict | None:
     return None
 
 
+def _analyze_track(tid: int, crop_list: list[tuple[int, np.ndarray]]) -> tuple[int, DemographicResult | None]:
+    """Analyze all crops for a single track and return (tid, result)."""
+    successful_analyses: list[dict] = []
+    for _frame_idx, crop in crop_list:
+        analysis = _analyze_single_crop(crop)
+        if analysis is not None:
+            successful_analyses.append(analysis)
+
+    if not successful_analyses:
+        logger.warning("Demographics failed for track %d (tried %d crops)", tid, len(crop_list))
+        return tid, None
+
+    gender_votes: list[tuple[str, float]] = []
+    ages: list[int] = []
+    for analysis in successful_analyses:
+        dominant_gender = analysis.get("dominant_gender", "Man")
+        gender_scores = analysis.get("gender", {})
+        conf = gender_scores.get(dominant_gender, 50.0) / 100.0
+        gender_votes.append(("male" if dominant_gender == "Man" else "female", conf))
+        ages.append(int(analysis["age"]))
+
+    vote_counts = Counter(g for g, _ in gender_votes)
+    winner_gender = vote_counts.most_common(1)[0][0]
+    winner_confidences = [c for g, c in gender_votes if g == winner_gender]
+    avg_confidence = sum(winner_confidences) / len(winner_confidences)
+
+    if avg_confidence < _MIN_GENDER_CONFIDENCE:
+        logger.info(
+            "Track %d: gender confidence %.2f below threshold %.2f, skipping",
+            tid, avg_confidence, _MIN_GENDER_CONFIDENCE,
+        )
+        return tid, None
+
+    avg_age = round(sum(ages) / len(ages))
+    return tid, DemographicResult(
+        age=avg_age,
+        age_group=_classify_age_group(avg_age),
+        gender=winner_gender,
+        confidence=avg_confidence,
+    )
+
+
 def analyze_demographics(
     video_path: str, tracked_frames: list[TrackedFrame]
 ) -> dict[int, DemographicResult]:
-    """Run DeepFace age/gender analysis on the best crops for each tracked person."""
+    """Run DeepFace age/gender analysis on the best crops for each tracked person.
+
+    Tracks are analyzed in parallel using a thread pool.
+    """
     all_crops = _find_top_crops(video_path, tracked_frames)
     results: dict[int, DemographicResult] = {}
 
-    for tid, crop_list in all_crops.items():
-        # Collect all successful analyses for voting
-        successful_analyses: list[dict] = []
-        for frame_idx, crop in crop_list:
-            analysis = _analyze_single_crop(crop)
-            if analysis is not None:
-                successful_analyses.append(analysis)
-
-        if not successful_analyses:
-            logger.warning("Demographics failed for track %d (tried %d crops)", tid, len(crop_list))
-            continue
-
-        # Multi-crop voting: use majority gender from all successful analyses
-        gender_votes: list[tuple[str, float]] = []
-        ages: list[int] = []
-        for analysis in successful_analyses:
-            dominant_gender = analysis.get("dominant_gender", "Man")
-            gender_scores = analysis.get("gender", {})
-            conf = gender_scores.get(dominant_gender, 50.0) / 100.0
-            gender_votes.append(("male" if dominant_gender == "Man" else "female", conf))
-            ages.append(int(analysis["age"]))
-
-        # Count votes and compute average confidence per gender
-        vote_counts = Counter(g for g, _ in gender_votes)
-        winner_gender = vote_counts.most_common(1)[0][0]
-        winner_confidences = [c for g, c in gender_votes if g == winner_gender]
-        avg_confidence = sum(winner_confidences) / len(winner_confidences)
-
-        # Skip if average confidence is too low (likely unreliable)
-        if avg_confidence < _MIN_GENDER_CONFIDENCE:
-            logger.info(
-                "Track %d: gender confidence %.2f below threshold %.2f, skipping",
-                tid, avg_confidence, _MIN_GENDER_CONFIDENCE,
-            )
-            continue
-
-        avg_age = round(sum(ages) / len(ages))
-
-        results[tid] = DemographicResult(
-            age=avg_age,
-            age_group=_classify_age_group(avg_age),
-            gender=winner_gender,
-            confidence=avg_confidence,
-        )
+    with ThreadPoolExecutor(max_workers=DEMOGRAPHICS_WORKERS) as executor:
+        futures = {
+            executor.submit(_analyze_track, tid, crop_list): tid
+            for tid, crop_list in all_crops.items()
+        }
+        for future in as_completed(futures):
+            tid, result = future.result()
+            if result is not None:
+                results[tid] = result
 
     logger.info("Demographics: %d/%d tracks analyzed", len(results), len(all_crops))
     return results

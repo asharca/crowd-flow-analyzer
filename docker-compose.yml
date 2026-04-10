@@ -32,9 +32,18 @@ services:
   worker:
     build: ./backend
     container_name: cfa-worker
+    # solo pool: one task at a time per process, safe with SQLite.
+    # To process multiple videos in parallel, scale with:
+    #   docker compose up --scale worker=N
+    # and switch to PostgreSQL (set CFA_DATABASE_URL).
     command: uv run celery -A app.worker.celery_app worker --loglevel=info --pool=solo
     environment:
       - CFA_REDIS_URL=redis://cfa-redis:6379/0
+      # Override via .env or compose override to tune for your server:
+      # CFA_ML_DEVICE=cuda        (auto-detected by default)
+      # CFA_DEMOGRAPHICS_WORKERS=8
+      # CFA_YOLO_BATCH_SIZE=16
+      # CFA_FRAME_SKIP=2          (lower = more frames processed)
     volumes:
       - upload_data:/app/storage/uploads
       - db_data:/app/storage/db
@@ -43,6 +52,13 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   frontend:
     build: ./frontend
