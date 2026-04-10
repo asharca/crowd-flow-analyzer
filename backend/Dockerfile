@@ -29,11 +29,7 @@ RUN uv sync --no-dev --no-install-project
 RUN uv run python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
 
 # Pre-download InsightFace buffalo_l model (SCRFD detector + genderage ONNX)
-RUN uv run python -c "
-from insightface.app import FaceAnalysis
-app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-app.prepare(ctx_id=-1, det_size=(640, 640))
-"
+RUN uv run python -c 'import insightface.app as ia; app = ia.FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"]); app.prepare(ctx_id=-1, det_size=(640, 640))'
 
 COPY . .
 
