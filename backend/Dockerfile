@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+FROM ubuntu:22.04
 
 # Install system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
