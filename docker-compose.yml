@@ -1,0 +1,54 @@
+services:
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build: ./backend
+    environment:
+      - CFA_REDIS_URL=redis://redis:6379/0
+      - CFA_CORS_ORIGINS=["http://localhost", "http://localhost:3000"]
+    volumes:
+      - upload_data:/app/storage/uploads
+      - db_data:/app/storage/db
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build: ./backend
+    command: celery -A app.worker.celery_app worker --loglevel=info --pool=solo
+    environment:
+      - CFA_REDIS_URL=redis://redis:6379/0
+    volumes:
+      - upload_data:/app/storage/uploads
+      - db_data:/app/storage/db
+    depends_on:
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  redis_data:
+  upload_data:
+  db_data:
