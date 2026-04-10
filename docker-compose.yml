@@ -1,6 +1,7 @@
 services:
   redis:
     image: redis:7-alpine
+    container_name: cfa-redis
     volumes:
       - redis_data:/data
     healthcheck:
@@ -11,8 +12,9 @@ services:
 
   backend:
     build: ./backend
+    container_name: cfa-backend
     environment:
-      - CFA_REDIS_URL=redis://redis:6379/0
+      - CFA_REDIS_URL=redis://cfa-redis:6379/0
       - CFA_CORS_ORIGINS=["http://localhost", "http://localhost:3000"]
     volumes:
       - upload_data:/app/storage/uploads
@@ -29,9 +31,10 @@ services:
 
   worker:
     build: ./backend
+    container_name: cfa-worker
     command: uv run celery -A app.worker.celery_app worker --loglevel=info --pool=solo
     environment:
-      - CFA_REDIS_URL=redis://redis:6379/0
+      - CFA_REDIS_URL=redis://cfa-redis:6379/0
     volumes:
       - upload_data:/app/storage/uploads
       - db_data:/app/storage/db
@@ -43,6 +46,7 @@ services:
 
   frontend:
     build: ./frontend
+    container_name: cfa-frontend
     ports:
       - "3000:80"
     depends_on:
