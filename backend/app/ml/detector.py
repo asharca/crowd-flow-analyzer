@@ -4,8 +4,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-from app.config import settings
-from app.ml.device import DEVICE, YOLO_BATCH_SIZE
+from app.ml.device import DEVICE, FRAME_SKIP, YOLO_BATCH_SIZE, YOLO_MODEL
 
 
 @dataclass
@@ -16,16 +15,21 @@ class FrameDetection:
     confidences: np.ndarray  # shape (N,)
 
 
-def detect_persons(video_path: str, frame_skip: int | None = None) -> list[FrameDetection]:
+def detect_persons(
+    video_path: str,
+    frame_skip: int | None = None,
+    yolo_model: str | None = None,
+    yolo_batch_size: int | None = None,
+) -> list[FrameDetection]:
     """Run YOLOv8 person detection on video frames using batch inference.
 
     Uses GPU (CUDA/MPS) when available, with FP16 on CUDA for ~2x throughput.
     Returns a list of FrameDetection, one per sampled frame.
     """
     if frame_skip is None:
-        frame_skip = settings.frame_skip
+        frame_skip = FRAME_SKIP
 
-    model = YOLO(settings.yolo_model)
+    model = YOLO(yolo_model or YOLO_MODEL)
     cap = cv2.VideoCapture(video_path)
 
     if not cap.isOpened():
@@ -77,7 +81,8 @@ def detect_persons(video_path: str, frame_skip: int | None = None) -> list[Frame
         if frame_idx % frame_skip == 0:
             batch_frames.append(frame)
             batch_indices.append(frame_idx)
-            if len(batch_frames) >= YOLO_BATCH_SIZE:
+            effective_batch = yolo_batch_size or YOLO_BATCH_SIZE
+            if len(batch_frames) >= effective_batch:
                 _flush_batch()
 
         frame_idx += 1

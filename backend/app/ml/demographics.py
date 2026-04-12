@@ -1,22 +1,27 @@
+"""Demographics analysis using MiVOLO v2 (body-based age/gender estimation).
+
+MiVOLO estimates age and gender from full-body crops without requiring
+face detection, making it robust for crowd scenes where faces are often
+not visible (back-facing, masked, distant).
+
+Pipeline: reuse YOLO person bboxes -> crop body regions -> batch MiVOLO inference.
+"""
+
 import logging
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
+import torch
 
-from app.ml.device import DEMOGRAPHICS_WORKERS, DEVICE, _cuda_device_index
+from app.ml.device import DEVICE, MIVOLO_BATCH_SIZE
 from app.ml.tracker import TrackedFrame
 
 logger = logging.getLogger(__name__)
 
 # Number of top crops to try per track (by bbox area — largest = closest to camera)
-_MAX_CROPS_PER_TRACK = 3
-# Minimum face confidence to accept InsightFace prediction
-_MIN_FACE_CONFIDENCE = 0.5
-# Minimum gender vote ratio to accept result (e.g. 2/3 crops agree)
-_MIN_VOTE_RATIO = 0.5
+_MAX_CROPS_PER_TRACK = 5
 
 
 @dataclass
@@ -27,31 +32,52 @@ class DemographicResult:
     confidence: float
 
 
-def _get_face_analyzer():
-    """Return a thread-local InsightFace FaceAnalysis instance.
+# ── Lazy-loaded MiVOLO singleton ────────────────────────────────────────────
 
-    InsightFace models are not thread-safe to share, so each worker gets its own.
-    Uses CUDA when available, falls back to CPU.
-    """
-    import threading
+_model = None
+_processor = None
+_config = None
+_face_zero: torch.Tensor | None = None  # pre-computed zero tensor for body-only mode
 
-    import onnxruntime as rt
 
-    local = threading.local()
-    if not hasattr(local, "app"):
-        from insightface.app import FaceAnalysis
+def _load_model() -> None:
+    """Load MiVOLO v2 from HuggingFace Hub (cached after first call)."""
+    global _model, _processor, _config, _face_zero
+    if _model is not None:
+        return
 
-        available = rt.get_available_providers()
-        if "CUDAExecutionProvider" in available and DEVICE.startswith("cuda"):
-            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
-            ctx_id = _cuda_device_index(DEVICE)
-        else:
-            providers = ["CPUExecutionProvider"]
-            ctx_id = -1
-        app = FaceAnalysis(name="buffalo_l", providers=providers)
-        app.prepare(ctx_id=ctx_id, det_size=(640, 640))
-        local.app = app
-    return local.app
+    from transformers import (
+        AutoConfig,
+        AutoImageProcessor,
+        AutoModelForImageClassification,
+    )
+
+    model_id = "iitolstykh/mivolo_v2"
+    use_fp16 = DEVICE.startswith("cuda")
+    dtype = torch.float16 if use_fp16 else torch.float32
+
+    logger.info("Loading MiVOLO v2 (device=%s, dtype=%s) ...", DEVICE, dtype)
+
+    _config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
+    _processor = AutoImageProcessor.from_pretrained(model_id, trust_remote_code=True)
+    _model = (
+        AutoModelForImageClassification.from_pretrained(
+            model_id, trust_remote_code=True, dtype=dtype,
+        )
+        .to(DEVICE)
+        .eval()
+    )
+
+    # Pre-compute a single "no face" zero tensor — reused for every body-only call
+    face_null = _processor(images=[None])["pixel_values"]
+    if isinstance(face_null, list):
+        face_null = torch.stack(face_null)
+    _face_zero = face_null.to(device=DEVICE, dtype=dtype)
+
+    logger.info("MiVOLO v2 ready")
+
+
+# ── Helpers ─────────────────────────────────────────────────────────────────
 
 
 def _classify_age_group(age: int) -> str:
@@ -67,10 +93,11 @@ def _classify_age_group(age: int) -> str:
 
 
 def _find_top_crops(
-    video_path: str, tracked_frames: list[TrackedFrame], max_per_track: int = _MAX_CROPS_PER_TRACK
+    video_path: str,
+    tracked_frames: list[TrackedFrame],
+    max_per_track: int = _MAX_CROPS_PER_TRACK,
 ) -> dict[int, list[tuple[int, np.ndarray]]]:
-    """For each unique track ID, find the top N frames (by bbox area)
-    and return cropped regions.
+    """For each track, find the top N frames (by bbox area) and return body crops.
 
     Returns dict[track_id -> [(frame_index, crop_array), ...]].
     """
@@ -87,7 +114,7 @@ def _find_top_crops(
         candidates.sort(key=lambda x: x[2], reverse=True)
         top_per_track[tid] = [(fi, bb) for fi, bb, _ in candidates[:max_per_track]]
 
-    # Group by frame to minimize video seeking
+    # Group by frame index to minimize video seeking
     frame_to_tracks: dict[int, list[tuple[int, np.ndarray]]] = {}
     for tid, entries in top_per_track.items():
         for frame_idx, bbox in entries:
@@ -116,89 +143,91 @@ def _find_top_crops(
     return crops
 
 
-def _analyze_crop(crop: np.ndarray) -> dict | None:
-    """Run InsightFace on a single person crop.
+# ── Batch inference ─────────────────────────────────────────────────────────
 
-    InsightFace's SCRFD detector handles small faces (down to ~16px) much better
-    than SSD/RetinaFace. Returns gender ('M'/'F') and age, or None if no face found.
+
+@torch.no_grad()
+def _infer_batch(crops: list[np.ndarray]) -> list[dict]:
+    """Run MiVOLO on a batch of body crops (no face detection needed).
+
+    Returns list of {"age": float, "gender": str, "confidence": float}.
     """
-    app = _get_face_analyzer()
-    # Resize small crops to give the detector a better chance
-    h, w = crop.shape[:2]
-    if h < 128 or w < 64:
-        scale = max(128 / h, 64 / w)
-        crop = cv2.resize(crop, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
+    body_processed = _processor(images=crops)["pixel_values"]
+    if isinstance(body_processed, list):
+        body_processed = torch.stack(body_processed)
+    body_batch = body_processed.to(device=DEVICE, dtype=_model.dtype)
 
-    faces = app.get(crop)
-    if not faces:
-        return None
+    # Expand the pre-computed face-zero tensor to match batch size
+    face_batch = _face_zero.expand(len(crops), -1, -1, -1)
 
-    # Pick the face with highest detection score
-    face = max(faces, key=lambda f: f.det_score)
-    if face.det_score < _MIN_FACE_CONFIDENCE:
-        return None
+    output = _model(faces_input=face_batch, body_input=body_batch)
 
-    return {"gender": face.sex, "age": int(face.age), "confidence": float(face.det_score)}
+    results = []
+    for i in range(len(crops)):
+        age = output.age_output[i].item()
+        gender_idx = output.gender_class_idx[i].item()
+        gender = _config.gender_id2label[gender_idx]
+        confidence = output.gender_probs[i].item()
+        results.append({"age": age, "gender": gender, "confidence": confidence})
+
+    return results
 
 
-def _analyze_track(tid: int, crop_list: list[tuple[int, np.ndarray]]) -> tuple[int, DemographicResult | None]:
-    """Analyze all crops for a single track via multi-crop voting."""
-    gender_votes: list[tuple[str, float]] = []
-    ages: list[int] = []
-
-    for _frame_idx, crop in crop_list:
-        result = _analyze_crop(crop)
-        if result is None:
-            continue
-        gender = "male" if result["gender"] == "M" else "female"
-        gender_votes.append((gender, result["confidence"]))
-        ages.append(result["age"])
-
-    if not gender_votes:
-        logger.warning("Demographics failed for track %d (tried %d crops)", tid, len(crop_list))
-        return tid, None
-
-    vote_counts = Counter(g for g, _ in gender_votes)
-    winner_gender = vote_counts.most_common(1)[0][0]
-    total_votes = len(gender_votes)
-    winner_votes = vote_counts[winner_gender]
-
-    if winner_votes / total_votes < _MIN_VOTE_RATIO:
-        logger.info("Track %d: ambiguous gender votes %s, skipping", tid, dict(vote_counts))
-        return tid, None
-
-    winner_confidences = [c for g, c in gender_votes if g == winner_gender]
-    avg_confidence = sum(winner_confidences) / len(winner_confidences)
-    avg_age = round(sum(ages) / len(ages))
-
-    return tid, DemographicResult(
-        age=avg_age,
-        age_group=_classify_age_group(avg_age),
-        gender=winner_gender,
-        confidence=avg_confidence,
-    )
+# ── Public API ──────────────────────────────────────────────────────────────
 
 
 def analyze_demographics(
-    video_path: str, tracked_frames: list[TrackedFrame]
+    video_path: str,
+    tracked_frames: list[TrackedFrame],
+    batch_size: int | None = None,
+    max_crops_per_track: int | None = None,
 ) -> dict[int, DemographicResult]:
-    """Run InsightFace age/gender analysis on the best crops for each tracked person.
+    """Run MiVOLO body-based age/gender on each tracked person.
 
-    Uses SCRFD face detector (designed for small/crowd faces) instead of SSD/RetinaFace.
-    Tracks are analyzed in parallel using a thread pool.
+    Uses batch GPU inference on body crops from existing YOLO detections.
+    No face detection required — works even when people face away from camera.
     """
-    all_crops = _find_top_crops(video_path, tracked_frames)
-    results: dict[int, DemographicResult] = {}
+    _load_model()
+    effective_max_crops = max_crops_per_track or _MAX_CROPS_PER_TRACK
+    all_crops = _find_top_crops(video_path, tracked_frames, max_per_track=effective_max_crops)
 
-    with ThreadPoolExecutor(max_workers=DEMOGRAPHICS_WORKERS) as executor:
-        futures = {
-            executor.submit(_analyze_track, tid, crop_list): tid
-            for tid, crop_list in all_crops.items()
-        }
-        for future in as_completed(futures):
-            tid, result = future.result()
-            if result is not None:
-                results[tid] = result
+    # Flatten all crops for batch processing: [(tid, crop), ...]
+    batch_items: list[tuple[int, np.ndarray]] = []
+    for tid, crop_list in all_crops.items():
+        for _, crop in crop_list:
+            batch_items.append((tid, crop))
+
+    if not batch_items:
+        logger.info("Demographics: no crops to analyze")
+        return {}
+
+    # Run batch inference
+    raw_results: dict[int, list[dict]] = {}
+    effective_batch = batch_size or MIVOLO_BATCH_SIZE
+    for start in range(0, len(batch_items), effective_batch):
+        batch = batch_items[start : start + effective_batch]
+        crops = [item[1] for item in batch]
+        predictions = _infer_batch(crops)
+
+        for (tid, _), pred in zip(batch, predictions):
+            raw_results.setdefault(tid, []).append(pred)
+
+    # Aggregate per track via multi-crop voting
+    results: dict[int, DemographicResult] = {}
+    for tid, predictions in raw_results.items():
+        genders = [p["gender"] for p in predictions]
+        winner_gender = Counter(genders).most_common(1)[0][0]
+
+        avg_age = round(sum(p["age"] for p in predictions) / len(predictions))
+        winner_confs = [p["confidence"] for p in predictions if p["gender"] == winner_gender]
+        avg_conf = sum(winner_confs) / len(winner_confs)
+
+        results[tid] = DemographicResult(
+            age=avg_age,
+            age_group=_classify_age_group(avg_age),
+            gender=winner_gender,
+            confidence=avg_conf,
+        )
 
     logger.info("Demographics: %d/%d tracks analyzed", len(results), len(all_crops))
     return results

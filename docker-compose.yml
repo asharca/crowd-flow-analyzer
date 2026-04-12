@@ -36,14 +36,13 @@ services:
     # To process multiple videos in parallel, scale with:
     #   docker compose up --scale worker=N
     # and switch to PostgreSQL (set CFA_DATABASE_URL).
-    command: uv run celery -A app.worker.celery_app worker --loglevel=info --pool=solo
+    command: uv run --no-sync celery -A app.worker.celery_app worker --loglevel=info --pool=solo
     environment:
       - CFA_REDIS_URL=redis://cfa-redis:6379/0
-      # Pin to physical GPU 1 (idle). CUDA_VISIBLE_DEVICES remaps it to
-      # logical index 0 inside the container, so CFA_ML_DEVICE=cuda:0.
-      # Change CUDA_VISIBLE_DEVICES=0 + CFA_ML_DEVICE=cuda:0 to use GPU 0 instead.
-      - CUDA_VISIBLE_DEVICES=1
-      - CFA_ML_DEVICE=cuda:0
+      # CUDA_VISIBLE_DEVICES remaps physical GPU to logical index 0.
+      # Set to the physical GPU index you want (0 for single-GPU hosts).
+      - CUDA_VISIBLE_DEVICES=0
+      - CFA_ML_DEVICE=auto
       # Tune for your server (optional overrides):
       # CFA_DEMOGRAPHICS_WORKERS=12
       # CFA_YOLO_BATCH_SIZE=64

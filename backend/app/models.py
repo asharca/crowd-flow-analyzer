@@ -25,6 +25,8 @@ class Video(Base):
     duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="queued")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    yolo_model: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    pipeline_params: Mapped[str] = mapped_column(Text, nullable=False, default="{}")  # JSON
     annotated_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
     celery_task_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[str] = mapped_column(Text, nullable=False, default=_utcnow)
@@ -47,6 +49,8 @@ class AnalysisResult(Base):
     foot_traffic: Mapped[str] = mapped_column(Text, nullable=False)  # JSON
     age_distribution: Mapped[str] = mapped_column(Text, nullable=False)  # JSON
     gender_distribution: Mapped[str] = mapped_column(Text, nullable=False)  # JSON
+    persons: Mapped[str] = mapped_column(Text, nullable=False, default="[]")  # JSON per-person
+    pipeline_config: Mapped[str] = mapped_column(Text, nullable=False, default="{}")  # JSON
     processing_time_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[str] = mapped_column(Text, nullable=False, default=_utcnow)
 

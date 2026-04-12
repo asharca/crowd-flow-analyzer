@@ -34,6 +34,25 @@ class AgeGroupDetail(BaseModel):
     total: int
 
 
+class PersonResult(BaseModel):
+    track_id: int
+    age: int | None
+    age_group: str | None
+    gender: str
+    confidence: float
+
+
+class PipelineConfig(BaseModel):
+    device: str = ""
+    gpu_name: str | None = None
+    gpu_vram_gb: float | None = None
+    yolo_model: str = ""
+    demographics_model: str = ""
+    yolo_batch_size: int = 0
+    mivolo_batch_size: int | None = None
+    frame_skip: int | None = None
+
+
 class AnalyticsResponse(BaseModel):
     video_id: str
     total_unique: int
@@ -41,6 +60,8 @@ class AnalyticsResponse(BaseModel):
     foot_traffic: list[FootTrafficPoint]
     age_distribution: dict[str, AgeGroupDetail]
     gender_distribution: dict[str, int]
+    persons: list[PersonResult]
+    pipeline_config: PipelineConfig
     processing_time_sec: float | None
 
 

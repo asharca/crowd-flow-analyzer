@@ -26,8 +26,9 @@ class Settings(BaseSettings):
     allowed_extensions: set[str] = {"mp4", "avi", "mov", "mkv"}
 
     # ML pipeline
-    frame_skip: int = 3
-    yolo_model: str = "yolov8n.pt"
+    frame_skip: int = 0  # 0 = auto (1 on GPU, 3 on CPU)
+    yolo_model: str = ""  # empty = auto (yolov8s on GPU, yolov8n on CPU)
+    mivolo_batch_size: int = 0  # 0 = auto-scale based on VRAM
     # "auto" selects CUDA > MPS > CPU at runtime
     ml_device: str = "auto"
     # 0 = use all available CPU threads

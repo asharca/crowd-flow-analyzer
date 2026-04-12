@@ -1,13 +1,24 @@
 import json
 
+import redis
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.models import Video
-from app.schemas import AgeGroupDetail, AnalyticsResponse, FootTrafficPoint
+from app.schemas import AgeGroupDetail, AnalyticsResponse, FootTrafficPoint, PersonResult, PipelineConfig
 
 router = APIRouter()
+
+_redis: redis.Redis | None = None
+
+
+def _get_redis() -> redis.Redis:
+    global _redis
+    if _redis is None:
+        _redis = redis.from_url(settings.redis_url, decode_responses=True)
+    return _redis
 
 
 def _get_video_with_analysis(video_id: str, db: Session) -> Video:
@@ -30,6 +41,9 @@ def get_analytics(video_id: str, db: Session = Depends(get_db)):
     age_raw = json.loads(result.age_distribution)
     age_dist = {k: AgeGroupDetail(**v) if isinstance(v, dict) else AgeGroupDetail(male=0, female=0, total=v) for k, v in age_raw.items()}
 
+    persons_raw = json.loads(result.persons) if result.persons else []
+    config_raw = json.loads(result.pipeline_config) if result.pipeline_config else {}
+
     return AnalyticsResponse(
         video_id=video_id,
         total_unique=result.total_unique,
@@ -37,8 +51,47 @@ def get_analytics(video_id: str, db: Session = Depends(get_db)):
         foot_traffic=[FootTrafficPoint(**p) for p in json.loads(result.foot_traffic)],
         age_distribution=age_dist,
         gender_distribution=json.loads(result.gender_distribution),
+        persons=[PersonResult(**p) for p in persons_raw],
+        pipeline_config=PipelineConfig(**config_raw),
         processing_time_sec=result.processing_time_sec,
     )
+
+
+@router.get("/{video_id}/progress")
+def get_progress(video_id: str, db: Session = Depends(get_db)):
+    """Get real-time processing progress from Redis."""
+    video = db.query(Video).filter(Video.id == video_id).first()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    if video.status == "completed":
+        return {
+            "stage": "completed",
+            "stage_percent": 100,
+            "overall_percent": 100,
+            "detail": "Processing complete",
+            "system_info": {},
+        }
+    if video.status == "failed":
+        return {
+            "stage": "failed",
+            "stage_percent": 0,
+            "overall_percent": 0,
+            "detail": video.error_message or "Unknown error",
+            "system_info": {},
+        }
+
+    raw = _get_redis().get(f"cfa:progress:{video_id}")
+    if raw:
+        return json.loads(raw)
+
+    return {
+        "stage": "queued",
+        "stage_percent": 0,
+        "overall_percent": 0,
+        "detail": "Waiting in queue...",
+        "system_info": {},
+    }
 
 
 @router.get("/{video_id}/analytics/foot-traffic")

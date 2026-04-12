@@ -2,12 +2,13 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
+from app.ml.models import get_default_model_id, get_model, list_models
 from app.models import Video
 from app.schemas import UploadResponse, VideoListResponse, VideoResponse
 
@@ -28,8 +29,33 @@ def _video_to_response(video: Video) -> VideoResponse:
 router = APIRouter()
 
 
+@router.get("/models")
+def get_available_models():
+    """List all available detection models and server defaults."""
+    from app.ml.device import DEVICE, FRAME_SKIP, MIVOLO_BATCH_SIZE, YOLO_BATCH_SIZE
+    return {
+        "models": list_models(),
+        "default": get_default_model_id(DEVICE),
+        "defaults": {
+            "frame_skip": FRAME_SKIP,
+            "yolo_batch_size": YOLO_BATCH_SIZE,
+            "mivolo_batch_size": MIVOLO_BATCH_SIZE,
+            "max_crops": 5,
+            "device": DEVICE,
+        },
+    }
+
+
 @router.post("/upload", response_model=UploadResponse)
-def upload_video(file: UploadFile, db: Session = Depends(get_db)):
+def upload_video(
+    file: UploadFile,
+    model: str = Form(default=""),
+    frame_skip: int = Form(default=0),
+    yolo_batch_size: int = Form(default=0),
+    mivolo_batch_size: int = Form(default=0),
+    max_crops: int = Form(default=0),
+    db: Session = Depends(get_db),
+):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
@@ -57,12 +83,32 @@ def upload_video(file: UploadFile, db: Session = Depends(get_db)):
             detail=f"File too large. Max size: {settings.max_upload_size_mb}MB",
         )
 
+    # Resolve model selection
+    if not model:
+        from app.ml.device import DEVICE
+        model = get_default_model_id(DEVICE)
+    model_info = get_model(model)
+
+    # Build pipeline params (0 = auto/server default)
+    import json
+    params: dict = {}
+    if frame_skip > 0:
+        params["frame_skip"] = frame_skip
+    if yolo_batch_size > 0:
+        params["yolo_batch_size"] = yolo_batch_size
+    if mivolo_batch_size > 0:
+        params["mivolo_batch_size"] = mivolo_batch_size
+    if max_crops > 0:
+        params["max_crops"] = max_crops
+
     # Create DB record
     video = Video(
         id=video_id,
         filename=filename,
         original_name=file.filename,
         file_size=file_size,
+        yolo_model=model_info.id,
+        pipeline_params=json.dumps(params),
     )
     db.add(video)
     db.commit()
