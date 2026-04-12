@@ -1,6 +1,6 @@
-# CUDA 12.9 runtime — matches driver 575 (supports up to CUDA 12.9).
-# torch+cu128 is backwards-compatible with this runtime; cu130 requires driver >=580.
-FROM nvidia/cuda:12.9.1-cudnn-runtime-ubuntu22.04
+# CUDA 12.8 runtime — must match torch+cu128 exactly to avoid cuBLAS version conflicts.
+# Driver 575 supports up to CUDA 12.9, so 12.8 runtime runs fine.
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 # Switch apt sources to Aliyun mirror
 RUN sed -i 's|http://archive.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list && \
@@ -32,12 +32,18 @@ ENV HF_ENDPOINT=https://hf-mirror.com
 WORKDIR /app
 
 COPY pyproject.toml ./
-# MiVOLO's setup.py uses pkg_resources — uv's no-build-isolation can't resolve it.
-# Workaround: pre-install setuptools + mivolo via pip, then uv sync skips rebuilding.
-RUN uv venv && \
-    uv pip install setuptools && \
-    uv pip install --no-build-isolation "mivolo @ git+https://github.com/WildChlamydia/MiVOLO.git" && \
-    uv sync --no-dev --no-install-project
+RUN uv sync --no-dev --no-install-project
+
+# Pre-download YOLO model weights (m=GPU default, n=CPU fallback)
+RUN uv run --no-sync python -c "from ultralytics import YOLO; YOLO('yolo11m.pt'); YOLO('yolo11n.pt')"
+
+# Pre-download MiVOLO v2 model
+RUN uv run --no-sync python -c '\
+from transformers import AutoConfig, AutoImageProcessor, AutoModelForImageClassification; \
+m = "iitolstykh/mivolo_v2"; \
+AutoConfig.from_pretrained(m, trust_remote_code=True); \
+AutoImageProcessor.from_pretrained(m, trust_remote_code=True); \
+AutoModelForImageClassification.from_pretrained(m, trust_remote_code=True)'
 
 COPY . .
 

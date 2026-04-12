@@ -48,12 +48,9 @@ torchvision = [
 ]
 # MiVOLO requires timm 0.8.13dev0 (never released to PyPI)
 timm = { git = "https://github.com/huggingface/pytorch-image-models.git", tag = "v0.8.13dev0" }
-mivolo = { git = "https://github.com/WildChlamydia/MiVOLO.git" }
+mivolo = { git = "https://github.com/asharca/MiVOLO.git" }
 
 [tool.uv]
-# MiVOLO's setup.py uses pkg_resources at top level — cannot use build isolation.
-# Requires setuptools pre-installed in the environment before uv sync.
-no-build-isolation-package = ["mivolo"]
 # MiVOLO pins ultralytics==8.1.0, but we need >=8.2.0. Override the transitive pin.
 override-dependencies = ["ultralytics>=8.2.0"]
 
