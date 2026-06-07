@@ -33,4 +33,4 @@ AutoModelForImageClassification.from_pretrained(m, trust_remote_code=True)
 "
 fi
 
-exec "\$@"
+exec "$@"
