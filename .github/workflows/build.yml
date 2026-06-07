@@ -35,6 +35,7 @@ jobs:
         with:
           context: ./backend
           push: true
+          platforms: linux/amd64
           tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/cfa-backend:latest
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
@@ -64,6 +65,7 @@ jobs:
         with:
           context: ./frontend
           push: true
+          platforms: linux/amd64
           tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/cfa-frontend:latest
           cache-from: type=gha,scope=frontend
           cache-to: type=gha,mode=max,scope=frontend
