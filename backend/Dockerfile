@@ -31,7 +31,7 @@ ENV HF_HOME=/app/model_weights/huggingface
 WORKDIR /app
 
 COPY pyproject.toml ./
-RUN uv sync --no-dev --no-install-project
+RUN uv sync --no-dev --no-install-project && uv cache clean
 
 COPY . .
 RUN mkdir -p storage/uploads storage/db
