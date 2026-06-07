@@ -26,8 +26,9 @@ ENV UV_LINK_MODE=copy
 ENV UV_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
-# HuggingFace mirror for faster model downloads in China
-ENV HF_ENDPOINT=https://hf-mirror.com
+# Pass --build-arg HF_ENDPOINT=https://hf-mirror.com for faster downloads in China
+ARG HF_ENDPOINT=https://huggingface.co
+ENV HF_ENDPOINT=${HF_ENDPOINT}
 
 WORKDIR /app
 
